@@ -1,4 +1,4 @@
-# main.py - Phiên bản FINAL V3 (High Threshold + Smart Regex)
+# main.py - Phiên bản V4: AUTO CLEAN BORDERS (Chống lệch + Xóa nhiễu)
 
 import discord
 from discord.ext import commands
@@ -6,17 +6,16 @@ import os
 import re
 import requests
 import io
-from PIL import Image, ImageOps, ImageDraw, ImageFilter
+from PIL import Image, ImageOps, ImageDraw
 from dotenv import load_dotenv
 import threading
 from flask import Flask
-import asyncio
 import pytesseract
 
 # --- SERVER GIỮ BOT ONLINE ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot OCR Karuta V3 đang chạy."
+def home(): return "Bot OCR Karuta V4 đang chạy."
 def run_web_server():
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
@@ -30,34 +29,52 @@ KARUTA_ID = 646937666251915264
 
 def extract_number_with_regex(text):
     """
-    Logic thông minh: Ưu tiên tìm pattern 'Print - Edition'
-    Ví dụ: '18013 · 2' hoặc '18013-2' -> Lấy 18013
+    Logic: Tìm chuỗi dạng 'Print - Edition'.
+    Nếu bị dính số rác ở đầu (vd: 718013-2), regex vẫn sẽ bắt đúng cụm 18013-2.
     """
     if not text: return "???"
     
-    # Bước 1: Thay thế các ký tự nhiễu thường gặp của dấu gạch ngang
-    # Đôi khi OCR đọc dấu - thành dấu ngã ~, dấu chấm ., hoặc dấu cách
-    cleaned_text = re.sub(r'[~—_.,]', '-', text) 
-
-    # Bước 2: Tìm pattern "Số - Số" (Print - Edition)
-    # (\d+) : Nhóm 1 (Số Print)
-    # \s*[-]\s* : Dấu gạch (có thể có khoảng trắng)
-    # \d+ : Số Edition
-    match = re.search(r'(\d+)\s*[-]\s*\d+', cleaned_text)
+    # 1. Dọn dẹp ký tự lạ, thay thế các dấu gạch/chấm lạ thành dấu '-' chuẩn
+    cleaned_text = re.sub(r'[~—_.,]', '-', text)
+    
+    # 2. Regex bắt buộc phải tìm thấy pattern: Số + Dấu cách/gạch + Số
+    # \b: Ranh giới từ (để tránh bắt dính chùm)
+    # (\d{1,6}): Nhóm 1 - Số Print (từ 1 đến 6 chữ số)
+    match = re.search(r'(\d{1,7})\s*[-]\s*\d+', cleaned_text)
     if match:
-        return match.group(1) # Trả về nhóm 1 (Số Print)
+        return match.group(1)
 
-    # Bước 3: Nếu không thấy dấu gạch, dùng logic cũ (tìm số dài nhất)
-    # Nhưng loại bỏ các số quá dài vô lý (trên 7 chữ số thường là do dính chùm)
+    # 3. Fallback: Nếu không tìm thấy dấu gạch, tìm số đứng riêng lẻ
+    # Lọc bỏ các số quá dài (>7 chữ số) vì đó thường là lỗi dính chùm
     numbers = re.findall(r'\d+', text)
-    if numbers:
-        # Lọc bỏ số > 7 chữ số (Karuta print hiện tại chưa đến hàng chục triệu)
-        valid_numbers = [n for n in numbers if len(n) < 8]
-        if valid_numbers:
-            valid_numbers.sort(key=len, reverse=True)
-            return valid_numbers[0]
+    valid_numbers = [n for n in numbers if len(n) < 7 and len(n) > 1]
+    
+    if valid_numbers:
+        # Lấy số dài nhất (ưu tiên Print hơn Edition)
+        valid_numbers.sort(key=len, reverse=True)
+        return valid_numbers[0]
             
     return "???"
+
+def clean_border_noise(img_bw):
+    """
+    Hàm này vẽ đè màu trắng lên mép trên/dưới/trái để xóa viền khung.
+    Giúp OCR không đọc nhầm viền thành số 7 hoặc 1.
+    """
+    draw = ImageDraw.Draw(img_bw)
+    w, h = img_bw.size
+    
+    # 1. Xóa mép trên (Top Eraser) - Xóa 15% chiều cao từ trên xuống
+    # Để loại bỏ các vệt đen của khung trên đầu số
+    draw.rectangle([0, 0, w, int(h * 0.15)], fill=255) # 255 = Trắng
+    
+    # 2. Xóa mép dưới (Bottom Eraser) - Xóa 5% chiều cao từ dưới lên
+    draw.rectangle([0, h - int(h * 0.05), w, h], fill=255)
+    
+    # 3. Xóa mép trái (Left Eraser) - Xóa 2% bên trái để an toàn
+    draw.rectangle([0, 0, int(w * 0.02), h], fill=255)
+    
+    return img_bw
 
 async def get_print_numbers_from_image(image_bytes):
     try:
@@ -69,14 +86,13 @@ async def get_print_numbers_from_image(image_bytes):
 
         card_w = w_img / 3
         
-        # --- CẤU HÌNH VÙNG CẮT (TINH CHỈNH MỚI) ---
-        # Thu hẹp chiều dọc lại một chút để cắt bớt viền khung trên/dưới
-        ratio_top = 0.90      # Tăng lên (cắt thấp hơn) để né viền trên
-        ratio_bottom = 0.97   # Giảm xuống (cắt cao hơn) để né viền dưới
-        
-        # Giữ nguyên chiều ngang 0.5 để né họa tiết bên trái
-        ratio_left = 0.50     
-        ratio_right = 0.96
+        # --- CẤU HÌNH VÙNG CẮT (ĐÃ NỚI RỘNG ĐỂ CHỐNG LỆCH) ---
+        # ratio_top: 0.85 (Cao hơn cũ 0.88/0.90) -> Đảm bảo không bị mất đầu số.
+        # ratio_left: 0.42 (Rộng hơn cũ 0.50) -> Đảm bảo số dài không bị mất đầu.
+        ratio_top = 0.85      
+        ratio_bottom = 0.98   
+        ratio_left = 0.42     
+        ratio_right = 0.97
 
         rel_top = int(h_img * ratio_top)
         rel_bottom = int(h_img * ratio_bottom)
@@ -95,40 +111,40 @@ async def get_print_numbers_from_image(image_bytes):
             box_right = card_x_start + rel_right_px
             box_bottom = rel_bottom
 
+            # Vẽ khung debug
             draw.rectangle([box_left, box_top, box_right, box_bottom], outline="red", width=3)
             crop = img.crop((box_left, box_top, box_right, box_bottom))
 
-            # --- XỬ LÝ ẢNH (QUAN TRỌNG) ---
+            # --- XỬ LÝ ẢNH ---
             crop = crop.resize((crop.width * 5, crop.height * 5), Image.Resampling.LANCZOS)
             crop = crop.convert('L') 
             
-            # THRESHOLDING CAO HƠN: 
-            # Tăng từ 110 lên 165. 
-            # Lý do: Số Print màu trắng tinh (255). Khung xám chỉ khoảng 120-150.
-            # Đặt 165 sẽ biến khung xám thành màu Đen (mất tích), chỉ còn lại số.
-            threshold_val = 165 
+            # Thresholding: Tách nền
+            threshold_val = 150 # Giảm nhẹ so với 165 để chữ không bị đứt nét
             crop = crop.point(lambda p: 255 if p > threshold_val else 0)
             
-            # Đảo màu (Chữ đen nền trắng)
+            # Đảo màu: Chữ đen nền trắng
             crop = ImageOps.invert(crop)
+            
+            # --- BƯỚC MỚI: TẨY XÓA THỦ CÔNG ---
+            # Gọi hàm xóa các vệt đen ở mép trên/dưới
+            crop = clean_border_noise(crop)
 
-            # Padding (Viền trắng)
+            # Thêm viền trắng an toàn
             crop = ImageOps.expand(crop, border=20, fill='white')
 
             img_byte_arr = io.BytesIO()
             crop.save(img_byte_arr, format='PNG')
             img_byte_arr.seek(0)
-            cropped_images.append(discord.File(img_byte_arr, filename=f"debug_crop_{i+1}.png"))
+            cropped_images.append(discord.File(img_byte_arr, filename=f"debug_clean_{i+1}.png"))
 
             # --- OCR ---
-            # Thêm ký tự '·' vào whitelist vì một số thẻ dùng dấu chấm giữa
             custom_config = r"--psm 7 --oem 1 -c tessedit_char_whitelist=0123456789-·" 
-            
             raw_text = pytesseract.image_to_string(crop, config=custom_config).strip()
             final_num = extract_number_with_regex(raw_text)
             
             results.append(final_num)
-            print(f"  [Card {i+1}] OCR Raw: '{raw_text}' -> Result: '{final_num}'")
+            print(f"  [Card {i+1}] OCR: '{raw_text}' -> Regex: '{final_num}'")
 
         full_debug_byte = io.BytesIO()
         debug_draw_img.save(full_debug_byte, format='PNG')
@@ -138,7 +154,7 @@ async def get_print_numbers_from_image(image_bytes):
         return results, debug_file, cropped_images
 
     except Exception as e:
-        print(f"Lỗi xử lý ảnh: {e}")
+        print(f"Lỗi xử lý: {e}")
         return [], None, []
 
 # --- BOT DISCORD ---
@@ -156,7 +172,7 @@ async def on_message(message):
     if not message.attachments[0].content_type.startswith('image/'): return
 
     print("\n" + "="*30)
-    print("🔎 Phát hiện ảnh Karuta, bắt đầu quét...")
+    print("🔎 Đang quét ảnh Karuta...")
 
     try:
         response = requests.get(message.attachments[0].url)
@@ -176,11 +192,11 @@ async def on_message(message):
             
             reply_text = "\n".join(reply_lines)
             
-            # Gửi tất cả ảnh debug để dễ kiểm tra
+            # Gửi ảnh debug để check
             all_files = [debug_full] + debug_crops
             
             await message.reply(content=reply_text, files=all_files)
-            print("✅ Đã gửi kết quả.")
+            print("✅ Xong.")
 
     except Exception as e:
         print(f"❌ Lỗi Bot: {e}")
