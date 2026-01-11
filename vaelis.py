@@ -4,8 +4,8 @@ import os
 import re
 import aiohttp
 import io
-# Thêm ImageChops để trừ màu
-from PIL import Image, ImageOps, ImageChops 
+# Thêm ImageFilter để làm đậm chữ
+from PIL import Image, ImageOps, ImageChops, ImageFilter 
 from dotenv import load_dotenv
 import threading
 from flask import Flask
@@ -17,7 +17,7 @@ from collections import deque
 # --- SERVER GIỮ BOT ONLINE ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot OCR Clean Mode."
+def home(): return "Bot OCR Bold Mode."
 def run_web_server():
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
@@ -30,17 +30,12 @@ KARUTA_ID = 646937666251915264
 processed_cache = deque(maxlen=50)
 
 def solve_ocr_fast(image_bytes, return_image=False):
-    """
-    ENGINE XỬ LÝ: CHANNEL SUBTRACTION (RED - BLUE)
-    Loại bỏ hoàn toàn nền xám và viền đen.
-    """
     try:
         img = Image.open(io.BytesIO(image_bytes))
         w_img, h_img = img.size
         
         card_w = w_img / 3
         
-        # Tọa độ cắt
         ratio_top, ratio_bottom = 0.88, 0.94
         ratio_left, ratio_right = 0.54, 0.78 
 
@@ -56,52 +51,48 @@ def solve_ocr_fast(image_bytes, return_image=False):
             )
             crop = img.crop(box)
 
-            # 2. XỬ LÝ (QUAN TRỌNG)
-            # Resize lớn lên
-            crop = crop.resize((crop.width * 2, crop.height * 2), Image.Resampling.BILINEAR)
+            # 2. XỬ LÝ
+            # Resize TO HƠN NỮA để khi làm đậm không bị dính nét
+            crop = crop.resize((crop.width * 3, crop.height * 3), Image.Resampling.BILINEAR)
             
-            # --- THUẬT TOÁN TÁCH MÀU VÀNG ---
-            # Tách ảnh thành 3 kênh màu: Red, Green, Blue
-            if crop.mode != 'RGB':
-                crop = crop.convert('RGB')
+            # --- CHANNEL SUBTRACTION (Tách nền) ---
+            if crop.mode != 'RGB': crop = crop.convert('RGB')
             r, g, b = crop.split()
-            
-            # Lấy kênh Đỏ trừ kênh Xanh Dương
-            # Màu Vàng (Nhiều Đỏ, Ít Xanh) -> Sẽ Sáng
-            # Màu Xám (Đỏ = Xanh) -> Sẽ Đen thui
-            # Màu Đen -> Sẽ Đen thui
             processed = ImageChops.subtract(r, b)
-            
-            # Threshold: Chỉ giữ lại những gì thực sự sáng (là số)
-            # Ngưỡng 50 là đủ để bắt màu vàng và loại bỏ nhiễu xám
             processed = processed.point(lambda p: 255 if p > 50 else 0)
-            
-            # Lúc này ta có: Số màu TRẮNG, Nền màu ĐEN (kể cả viền)
-            # Đảo ngược lại để chuẩn format OCR: Số ĐEN, Nền TRẮNG
             processed = ImageOps.invert(processed)
             
-            # Thêm viền trắng an toàn
-            processed = ImageOps.expand(processed, border=20, fill='white')
+            # --- BƯỚC MỚI: LÀM ĐẬM CHỮ (THICKEN) ---
+            # MinFilter(3) sẽ tìm điểm đen nhất trong ô 3x3 và lan rộng nó ra
+            # Giúp nối lại các nét đứt và làm số dày lên
+            processed = processed.filter(ImageFilter.MinFilter(3))
+
+            # Thêm viền trắng
+            processed = ImageOps.expand(processed, border=30, fill='white')
             
             crops.append(processed)
 
         # 3. GỘP DỌC
         w_c, h_c = crops[0].size
-        total_h = (h_c * 3) + 20
+        total_h = (h_c * 3) + 30
         
         final_img = Image.new('L', (w_c, total_h), color=255)
         
         final_img.paste(crops[0], (0, 0))
-        final_img.paste(crops[1], (0, h_c + 10))
-        final_img.paste(crops[2], (0, (h_c * 2) + 20))
+        final_img.paste(crops[1], (0, h_c + 15))
+        final_img.paste(crops[2], (0, (h_c * 2) + 30))
 
         if return_image:
             return final_img
 
         # 4. OCR
+        # Thêm --psm 6 để ép đọc thành 1 khối
         custom_config = r"--psm 6 -c tessedit_char_whitelist=0123456789-·."
         text = pytesseract.image_to_string(final_img, config=custom_config)
         
+        # Debug: In ra xem Tesseract thực sự nhìn thấy gì
+        print(f"OCR Raw Output: {text.strip()}")
+
         matches = re.findall(r'\d+(?:[-·\.]\d+)?', text)
         
         results = []
@@ -118,14 +109,14 @@ def solve_ocr_fast(image_bytes, return_image=False):
         print(f"Error: {e}")
         return None
 
-# --- BOT COMMANDS ---
+# --- BOT COMMANDS (GIỮ NGUYÊN) ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f'✨ BOT CLEAN BORDER READY: {bot.user}')
+    print(f'✨ BOT BOLD TEXT READY: {bot.user}')
 
 @bot.command()
 async def ocr(ctx):
@@ -157,11 +148,9 @@ async def ocr(ctx):
                 processed_img.save(image_binary, 'PNG')
                 image_binary.seek(0)
                 await ctx.send(
-                    content="**Ảnh đã lọc sạch nền (Red - Blue Channel):**",
-                    file=discord.File(fp=image_binary, filename='clean_ocr.png')
+                    content="**Ảnh đã làm đậm (Thicken):**",
+                    file=discord.File(fp=image_binary, filename='bold_ocr.png')
                 )
-        else:
-            await ctx.send("❌ Lỗi xử lý.")
 
 @bot.event
 async def on_message(message):
@@ -184,7 +173,7 @@ async def on_message(message):
 
         if numbers:
             embed = discord.Embed(color=0x36393f, timestamp=message.created_at)
-            embed.set_footer(text="⚡ Clean OCR") 
+            embed.set_footer(text="⚡ Clean & Bold") 
             description = ""
             emojis = ["1️⃣", "2️⃣", "3️⃣"]
             for i, num in enumerate(numbers):
