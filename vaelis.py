@@ -4,7 +4,8 @@ import os
 import re
 import aiohttp
 import io
-from PIL import Image, ImageOps, ImageEnhance 
+# Thêm ImageChops để trừ màu
+from PIL import Image, ImageOps, ImageChops 
 from dotenv import load_dotenv
 import threading
 from flask import Flask
@@ -16,7 +17,7 @@ from collections import deque
 # --- SERVER GIỮ BOT ONLINE ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot OCR Debug Mode."
+def home(): return "Bot OCR Clean Mode."
 def run_web_server():
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
@@ -30,9 +31,8 @@ processed_cache = deque(maxlen=50)
 
 def solve_ocr_fast(image_bytes, return_image=False):
     """
-    ENGINE XỬ LÝ: Có thêm tham số return_image
-    - Nếu return_image = True: Trả về tấm ảnh đã xử lý (để debug)
-    - Nếu return_image = False: Trả về kết quả số (để bot chạy)
+    ENGINE XỬ LÝ: CHANNEL SUBTRACTION (RED - BLUE)
+    Loại bỏ hoàn toàn nền xám và viền đen.
     """
     try:
         img = Image.open(io.BytesIO(image_bytes))
@@ -40,6 +40,7 @@ def solve_ocr_fast(image_bytes, return_image=False):
         
         card_w = w_img / 3
         
+        # Tọa độ cắt
         ratio_top, ratio_bottom = 0.88, 0.94
         ratio_left, ratio_right = 0.54, 0.78 
 
@@ -55,26 +56,36 @@ def solve_ocr_fast(image_bytes, return_image=False):
             )
             crop = img.crop(box)
 
-            # 2. XỬ LÝ MÀU
+            # 2. XỬ LÝ (QUAN TRỌNG)
+            # Resize lớn lên
             crop = crop.resize((crop.width * 2, crop.height * 2), Image.Resampling.BILINEAR)
-
-            # Tăng màu (Tách vàng khỏi xám)
-            enhancer = ImageEnhance.Color(crop)
-            crop = enhancer.enhance(2.5) 
-
-            # Tăng tương phản
-            enhancer = ImageEnhance.Contrast(crop)
-            crop = enhancer.enhance(2.0)
-
-            # 3. BINARIZATION
-            crop = crop.convert('L')
-            crop = crop.point(lambda p: 255 if p > 100 else 0)
-            crop = ImageOps.invert(crop)
-            crop = ImageOps.expand(crop, border=20, fill='white')
             
-            crops.append(crop)
+            # --- THUẬT TOÁN TÁCH MÀU VÀNG ---
+            # Tách ảnh thành 3 kênh màu: Red, Green, Blue
+            if crop.mode != 'RGB':
+                crop = crop.convert('RGB')
+            r, g, b = crop.split()
+            
+            # Lấy kênh Đỏ trừ kênh Xanh Dương
+            # Màu Vàng (Nhiều Đỏ, Ít Xanh) -> Sẽ Sáng
+            # Màu Xám (Đỏ = Xanh) -> Sẽ Đen thui
+            # Màu Đen -> Sẽ Đen thui
+            processed = ImageChops.subtract(r, b)
+            
+            # Threshold: Chỉ giữ lại những gì thực sự sáng (là số)
+            # Ngưỡng 50 là đủ để bắt màu vàng và loại bỏ nhiễu xám
+            processed = processed.point(lambda p: 255 if p > 50 else 0)
+            
+            # Lúc này ta có: Số màu TRẮNG, Nền màu ĐEN (kể cả viền)
+            # Đảo ngược lại để chuẩn format OCR: Số ĐEN, Nền TRẮNG
+            processed = ImageOps.invert(processed)
+            
+            # Thêm viền trắng an toàn
+            processed = ImageOps.expand(processed, border=20, fill='white')
+            
+            crops.append(processed)
 
-        # 4. GỘP DỌC
+        # 3. GỘP DỌC
         w_c, h_c = crops[0].size
         total_h = (h_c * 3) + 20
         
@@ -84,11 +95,10 @@ def solve_ocr_fast(image_bytes, return_image=False):
         final_img.paste(crops[1], (0, h_c + 10))
         final_img.paste(crops[2], (0, (h_c * 2) + 20))
 
-        # --- NẾU LÀ LỆNH !OCR THÌ TRẢ VỀ ẢNH LUÔN ---
         if return_image:
             return final_img
 
-        # 5. OCR (Nếu bot chạy tự động)
+        # 4. OCR
         custom_config = r"--psm 6 -c tessedit_char_whitelist=0123456789-·."
         text = pytesseract.image_to_string(final_img, config=custom_config)
         
@@ -108,69 +118,54 @@ def solve_ocr_fast(image_bytes, return_image=False):
         print(f"Error: {e}")
         return None
 
-# --- BOT DISCORD ---
+# --- BOT COMMANDS ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f'✨ BOT READY: {bot.user}')
+    print(f'✨ BOT CLEAN BORDER READY: {bot.user}')
 
-# --- LỆNH !OCR (MỚI) ---
 @bot.command()
 async def ocr(ctx):
-    """Lệnh để test xem bot nhìn thấy gì"""
     target_url = None
-
-    # Trường hợp 1: Có đính kèm ảnh trong tin nhắn lệnh
     if ctx.message.attachments:
         target_url = ctx.message.attachments[0].url
-    # Trường hợp 2: Reply vào một tin nhắn có ảnh
     elif ctx.message.reference:
         original_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
         if original_msg.attachments:
             target_url = original_msg.attachments[0].url
 
     if not target_url:
-        await ctx.send("❌ Vui lòng gửi kèm ảnh hoặc Reply vào ảnh cần check.")
+        await ctx.send("❌ Vui lòng gửi/reply ảnh.")
         return
 
     async with ctx.typing():
-        # Tải ảnh
         async with aiohttp.ClientSession() as session:
             async with session.get(target_url) as resp:
-                if resp.status != 200:
-                    await ctx.send("❌ Lỗi tải ảnh.")
-                    return
                 image_bytes = await resp.read()
 
-        # Xử lý ảnh (Bật chế độ return_image=True)
         loop = asyncio.get_running_loop()
-        # Dùng partial để truyền tham số return_image=True
         processed_img = await loop.run_in_executor(
             None, 
             functools.partial(solve_ocr_fast, image_bytes, return_image=True)
         )
 
         if processed_img:
-            # Chuyển ảnh PIL thành file gửi Discord
             with io.BytesIO() as image_binary:
                 processed_img.save(image_binary, 'PNG')
                 image_binary.seek(0)
                 await ctx.send(
-                    content="**Ảnh bot đã xử lý (Cắt -> Chỉnh màu -> Gộp):**",
-                    file=discord.File(fp=image_binary, filename='debug_view.png')
+                    content="**Ảnh đã lọc sạch nền (Red - Blue Channel):**",
+                    file=discord.File(fp=image_binary, filename='clean_ocr.png')
                 )
         else:
-            await ctx.send("❌ Lỗi xử lý ảnh.")
+            await ctx.send("❌ Lỗi xử lý.")
 
-# --- AUTO OCR KARUTA (GIỮ NGUYÊN) ---
 @bot.event
 async def on_message(message):
-    # Dòng này để bot vẫn nhận lệnh !ocr
     await bot.process_commands(message)
-
     if message.author.id != KARUTA_ID: return
     if not message.attachments: return
     if message.id in processed_cache: return
@@ -182,16 +177,14 @@ async def on_message(message):
 
         async with aiohttp.ClientSession() as session:
             async with session.get(att.url) as resp:
-                if resp.status != 200: return
                 image_bytes = await resp.read()
 
         loop = asyncio.get_running_loop()
-        # Mặc định return_image=False
         numbers = await loop.run_in_executor(None, functools.partial(solve_ocr_fast, image_bytes))
 
         if numbers:
             embed = discord.Embed(color=0x36393f, timestamp=message.created_at)
-            embed.set_footer(text="⚡ Color Filter") 
+            embed.set_footer(text="⚡ Clean OCR") 
             description = ""
             emojis = ["1️⃣", "2️⃣", "3️⃣"]
             for i, num in enumerate(numbers):
@@ -200,9 +193,7 @@ async def on_message(message):
             
             embed.description = description
             await message.reply(embed=embed, mention_author=False)
-
-    except Exception as e:
-        print(f"Auto Error: {e}")
+    except: pass
 
 if __name__ == "__main__":
     if TOKEN:
