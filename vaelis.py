@@ -1,4 +1,4 @@
-﻿# main.py (Phiên bản CHỈ ĐỌC PRINT NUMBER - Góc dưới phải)
+# main.py - Phiên bản Hoàn Chỉnh: Đọc Print Number (Upscale + Khử nhiễu)
 
 import discord
 from discord.ext import commands
@@ -6,123 +6,132 @@ import os
 import re
 import requests
 import io
-from PIL import Image, ImageOps # Cần thêm ImageOps để xử lý ảnh
+from PIL import Image, ImageOps
 from dotenv import load_dotenv
 import threading
 from flask import Flask
 import asyncio
 import pytesseract
 
-# --- PHẦN 1: CẤU HÌNH WEB SERVER (Giữ nguyên để bot chạy trên host) ---
+# --- PHẦN 1: CẤU HÌNH WEB SERVER (Giữ bot online trên Render) ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot Discord (Đọc Print Number) đang hoạt động."
+    return "Bot Discord (OCR Print Number) đang hoạt động."
 
 def run_web_server():
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- PHẦN 2: CẤU HÌNH VÀ CÁC HÀM CỦA BOT DISCORD ---
+# --- PHẦN 2: CẤU HÌNH BOT ---
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 KARUTA_ID = 646937666251915264
 
-# Cấu hình đường dẫn Tesseract (Nếu chạy trên Windows thì bỏ comment dòng dưới)
+# Nếu chạy trên Windows, bỏ comment dòng dưới và trỏ đúng đường dẫn
 # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 def clean_print_number(text):
     """
-    Làm sạch chuỗi OCR để chỉ lấy số print đầu tiên.
-    Quy tắc: Gặp dấu chấm (.), gạch ngang (-) hoặc chấm giữa (·) thì bỏ phần sau.
-    Chỉ giữ lại các ký tự số.
+    Làm sạch kết quả OCR:
+    - Chỉ giữ lại số.
+    - Cắt bỏ phần thừa sau các dấu chấm, gạch ngang (nếu có).
     """
     if not text:
         return "???"
     
-    # Dùng regex để tách chuỗi tại các dấu phân cách thường gặp
-    # Ký tự \u00B7 là dấu chấm giữa (·) thường thấy trên thẻ Karuta
+    # Tách chuỗi tại các dấu phân cách thường gặp: . - ·
     parts = re.split(r'[.\-\u00B7]', text)
-    
-    # Lấy phần đầu tiên (trước dấu phân cách)
     first_part = parts[0]
     
-    # Chỉ giữ lại các ký tự số trong phần đầu tiên
+    # Chỉ giữ lại số
     cleaned_number = re.sub(r'\D', '', first_part)
     
     return cleaned_number if cleaned_number else "???"
 
 async def get_print_numbers_from_image(image_bytes):
     """
-    Cắt ảnh tại góc dưới bên phải của 3 thẻ và đọc số Print Number.
+    Xử lý ảnh: Cắt góc dưới phải -> Phóng to -> Khử nhiễu -> Đọc số
     """
     try:
         img = Image.open(io.BytesIO(image_bytes))
         width, height = img.size
         
-        # Kiểm tra kích thước ảnh drop 3 thẻ (khoảng 836x312)
+        # Bỏ qua nếu ảnh quá nhỏ (không phải ảnh drop 3 thẻ)
         if width < 830 or height < 300:
-            print(f"  [OCR] Kích thước ảnh không phù hợp ({width}x{height}), bỏ qua.")
             return []
 
-        # Kích thước cố định cho mỗi thẻ
+        # Thông số kỹ thuật của thẻ Karuta
         card_width = 278
         card_height = 248
-        x_coords = [0, 279, 558] # Tọa độ x bắt đầu của mỗi thẻ
-        y_offset = 32            # Tọa độ y bắt đầu của các thẻ
+        x_coords = [0, 279, 558] 
+        y_offset = 32           
 
-        # Tọa độ tương đối để cắt vùng số ở góc dưới phải (Relative crop box)
-        # (Left, Top, Right, Bottom) tính từ góc trên trái của MỖI THẺ
-        # Đã căn chỉnh dựa trên ảnh mẫu để lấy vừa đủ vùng số đen
-        print_box_relative = (170, 225, 275, 248)
+        # Tọa độ cắt vùng Print Number (tương đối trong 1 thẻ)
+        # Left=100: Lấy rộng ra để bắt được số dài
+        # Top=230: Vừa khít dòng số
+        # Right=275: Sát mép phải
+        # Bottom=247: Sát mép dưới
+        print_box_relative = (100, 230, 275, 247)
 
         print_numbers = []
 
-        for i in range(3): # Xử lý 3 thẻ
-            # 1. Cắt từng thẻ lớn ra khỏi ảnh gốc
+        for i in range(3): 
+            # 1. Cắt từng thẻ lớn
             card_box = (x_coords[i], y_offset, x_coords[i] + card_width, y_offset + card_height)
             card_img = img.crop(card_box)
 
-            # 2. Cắt lấy vùng nhỏ chứa số print ở góc dưới phải thẻ đó
+            # 2. Cắt vùng chứa số
             print_img = card_img.crop(print_box_relative)
             
-            # 3. Xử lý ảnh trước khi đưa vào OCR (QUAN TRỌNG)
-            # Chuyển sang ảnh xám (grayscale)
-            print_img_gray = print_img.convert('L')
-            # Đảo ngược màu: Biến chữ màu sáng trên nền tối thành chữ đen trên nền trắng
-            # Tesseract đọc dạng này tốt hơn nhiều.
-            print_img_inverted = ImageOps.invert(print_img_gray)
+            # --- XỬ LÝ ẢNH NÂNG CAO (QUAN TRỌNG) ---
+            
+            # A. Phóng to ảnh gấp 3 lần (Upscale) để Tesseract nhìn rõ số bé
+            new_size = (print_img.width * 3, print_img.height * 3)
+            print_img = print_img.resize(new_size, Image.Resampling.LANCZOS)
+            
+            # B. Chuyển sang ảnh xám
+            print_img = print_img.convert('L')
+            
+            # C. Tăng tương phản (Binarization/Thresholding)
+            # Biến màu xám mờ thành trắng, xám đậm thành đen tuyệt đối
+            print_img = print_img.point(lambda p: 255 if p > 140 else 0)
 
-            # 4. Đọc chữ bằng Tesseract
-            # Cấu hình chỉ cho phép đọc số và các dấu phân cách
+            # D. Đảo ngược màu (Chuyển thành chữ đen nền trắng)
+            print_img_inverted = ImageOps.invert(print_img)
+
+            # 3. Đọc OCR
+            # --psm 7: Treat the image as a single text line.
+            # whitelist: Chỉ đọc số và ký tự phân cách
             custom_config = r"--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789.-·"
             raw_text = pytesseract.image_to_string(print_img_inverted, config=custom_config).strip()
             
-            # 5. Làm sạch dữ liệu theo yêu cầu
+            # 4. Làm sạch số liệu
             cleaned_num = clean_print_number(raw_text)
             print_numbers.append(cleaned_num)
-            print(f"  [Thẻ {i+1}] Raw: '{raw_text}' -> Cleaned: '{cleaned_num}'")
+            
+            # (Tùy chọn) In ra console để debug nếu cần
+            print(f"  [Thẻ {i+1}] Raw: '{raw_text}' -> Clean: '{cleaned_num}'")
 
         return print_numbers
 
     except Exception as e:
-        print(f"  [LỖI OCR] Đã xảy ra lỗi khi xử lý ảnh: {e}")
+        print(f"  [LỖI OCR] {e}")
         return []
 
-# --- PHẦN CHÍNH CỦA BOT ---
+# --- PHẦN 3: SỰ KIỆN DISCORD ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f'✅ Bot Discord đã đăng nhập: {bot.user}')
-    print('Bot đang chạy chế độ chỉ đọc Print Number.')
+    print(f'✅ Bot đã online: {bot.user}')
 
 @bot.event
 async def on_message(message):
-    # Chỉ xử lý tin nhắn từ Karuta bot có đính kèm ảnh
+    # Chỉ xử lý tin nhắn từ Bot Karuta có đính kèm ảnh
     if not (message.author.id == KARUTA_ID and message.attachments):
         return
 
@@ -131,47 +140,49 @@ async def on_message(message):
         return
 
     print("\n" + "="*40)
-    print(f"🔎 [LOG] Phát hiện ảnh drop Karuta. Đang đọc số Print...")
+    print(f"🔎 Phát hiện ảnh Karuta. Đang xử lý...")
 
     try:
+        # Tải ảnh về bộ nhớ
         response = requests.get(attachment.url)
         response.raise_for_status()
         image_bytes = response.content
 
-        # Gọi hàm xử lý ảnh mới
+        # Gọi hàm OCR
         print_numbers_list = await get_print_numbers_from_image(image_bytes)
 
         if not print_numbers_list:
-            print("  -> Không đọc được số nào. Bỏ qua.")
+            print("  -> Không nhận dạng được số nào.")
             print("="*40 + "\n")
             return
 
         async with message.channel.typing():
-            await asyncio.sleep(0.5) # Nghỉ nhẹ một chút cho tự nhiên
+            await asyncio.sleep(0.5) 
             
-            # Danh sách emoji số thứ tự
+            # Tạo nội dung trả lời theo định dạng yêu cầu
             emojis = ["1️⃣", "2️⃣", "3️⃣"]
             reply_lines = []
             
-            # Tạo nội dung tin nhắn trả về theo định dạng yêu cầu
             for i, num in enumerate(print_numbers_list):
-                # Định dạng: ▪️ 1️⃣ | #12345
+                # Format: ▪️ 1️⃣ | #12345
                 line = f"▪️ {emojis[i]} | #{num}"
                 reply_lines.append(line)
             
             reply_content = "\n".join(reply_lines)
             await message.reply(reply_content)
-            print("✅ ĐÃ GỬI KẾT QUẢ PRINT NUMBER")
+            print("✅ Đã gửi kết quả.")
 
     except Exception as e:
-        print(f"  [LỖI] Đã xảy ra lỗi: {e}")
+        print(f"  [LỖI] {e}")
     print("="*40 + "\n")
 
-# --- PHẦN KHỞI ĐỘNG ---
+# --- PHẦN 4: KHỞI ĐỘNG ---
 if __name__ == "__main__":
     if TOKEN:
+        # Chạy Bot ở luồng riêng
         bot_thread = threading.Thread(target=bot.run, args=(TOKEN,))
         bot_thread.start()
+        # Chạy Web Server để Render không tắt bot
         run_web_server()
     else:
-        print("❌ LỖI: Thiếu DISCORD_TOKEN trong file .env")
+        print("❌ LỖI: Chưa cấu hình DISCORD_TOKEN trong file .env")
