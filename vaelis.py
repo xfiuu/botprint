@@ -1,4 +1,4 @@
-# main.py - Phiên bản SUPER TIGHT CROP (Cắt sát viền số)
+# main.py - Phiên bản BALANCED FIX (Cắt chuẩn vị trí số Print)
 
 import discord
 from discord.ext import commands
@@ -60,13 +60,15 @@ async def get_print_numbers_from_image(image_bytes):
 
         card_w = w_img / 3
         
-        # --- CẤU HÌNH VÙNG CẮT (ĐÃ CHỈNH SỬA CẮT SÁT) ---
-        # ratio_top = 0.91: Chỉ lấy phần đáy cực thấp (né hoàn toàn tên Series)
-        # ratio_left = 0.68: Bỏ qua hơn 2/3 thẻ bên trái, chỉ lấy góc phải
-        ratio_top = 0.91      
+        # --- CẤU HÌNH VÙNG CẮT (ĐÃ CHỈNH LẠI CHUẨN) ---
+        # ratio_top: 0.89 -> Lấy cao hơn xíu để không mất đầu số
+        # ratio_left: 0.55 -> Lấy từ gần giữa thẻ (bao trọn số Print)
+        # ratio_right: 0.95 -> Không lấy sát mép phải quá (tránh rác)
+        
+        ratio_top = 0.89      
         ratio_bottom = 0.98   
-        ratio_left = 0.68     
-        ratio_right = 0.96
+        ratio_left = 0.55     
+        ratio_right = 0.95
 
         rel_top = int(h_img * ratio_top)
         rel_bottom = int(h_img * ratio_bottom)
@@ -99,8 +101,8 @@ async def get_print_numbers_from_image(image_bytes):
             crop = crop.convert('L') 
             
             # THRESHOLDING: Biến ảnh thành đen trắng tuyệt đối
-            # Ngưỡng 110: Điểm ảnh sáng hơn 110 -> Trắng, tối hơn -> Đen
-            threshold_val = 110 
+            # Ngưỡng 100: Giảm nhẹ để nét chữ dày hơn
+            threshold_val = 100
             crop = crop.point(lambda p: 255 if p > threshold_val else 0)
             
             # Đảo màu: Để thành Chữ Đen trên Nền Trắng (Tesseract thích cái này nhất)
