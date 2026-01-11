@@ -65,7 +65,7 @@ async def get_print_numbers_from_image(image_bytes):
         # ratio_left: 0.55 -> Lấy từ gần giữa thẻ (bao trọn số Print)
         # ratio_right: 0.95 -> Không lấy sát mép phải quá (tránh rác)
         
-        ratio_top = 0.87
+        ratio_top = 0.89
         ratio_bottom = 0.94   
         ratio_left = 0.54     
         ratio_right = 0.80
@@ -195,6 +195,7 @@ if __name__ == "__main__":
         run_web_server()
     else:
         print("❌ LỖI: Chưa set DISCORD_TOKEN trong file .env")
+
 
 
 
