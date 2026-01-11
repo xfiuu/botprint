@@ -1,4 +1,4 @@
-# main.py - Phiên bản FINAL FIX (Ratio Left 0.5 + Thresholding)
+# main.py - Phiên bản SUPER TIGHT CROP (Cắt sát viền số)
 
 import discord
 from discord.ext import commands
@@ -60,12 +60,12 @@ async def get_print_numbers_from_image(image_bytes):
 
         card_w = w_img / 3
         
-        # --- CẤU HÌNH VÙNG CẮT (QUAN TRỌNG NHẤT) ---
-        # ratio_top = 0.88: Né tên Series ở trên
-        # ratio_left = 0.50: Né họa tiết trang trí hình tam giác đen bên trái (FIX LỖI NHIỄU)
-        ratio_top = 0.88      
+        # --- CẤU HÌNH VÙNG CẮT (ĐÃ CHỈNH SỬA CẮT SÁT) ---
+        # ratio_top = 0.91: Chỉ lấy phần đáy cực thấp (né hoàn toàn tên Series)
+        # ratio_left = 0.68: Bỏ qua hơn 2/3 thẻ bên trái, chỉ lấy góc phải
+        ratio_top = 0.91      
         ratio_bottom = 0.98   
-        ratio_left = 0.50     
+        ratio_left = 0.68     
         ratio_right = 0.96
 
         rel_top = int(h_img * ratio_top)
