@@ -67,9 +67,9 @@ async def get_print_numbers_from_image(image_bytes):
         # --- CẤU HÌNH VÙNG CẮT (ĐÃ TINH CHỈNH CHO GIẢI PHÁP 1) ---
         # ratio_left: 0.58 -> Bỏ qua phần tên Series bên trái, tập trung vào góc phải
         ratio_top = 0.88
-        ratio_bottom = 0.96   
-        ratio_left = 0.58     
-        ratio_right = 0.96
+        ratio_bottom = 0.94   
+        ratio_left = 0.54     
+        ratio_right = 0.78
 
         rel_top = int(h_img * ratio_top)
         rel_bottom = int(h_img * ratio_bottom)
@@ -202,3 +202,4 @@ if __name__ == "__main__":
         run_web_server()
     else:
         print("❌ LỖI: Chưa set DISCORD_TOKEN trong file .env")
+
