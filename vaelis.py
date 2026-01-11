@@ -1,4 +1,4 @@
-# main.py - Phiên bản Tự Động Căn Chỉnh (Auto-Scale) + Debug Mode
+# main.py - Phiên bản VISUAL DEBUG + REGEX FINDER
 
 import discord
 from discord.ext import commands
@@ -6,175 +6,176 @@ import os
 import re
 import requests
 import io
-from PIL import Image, ImageOps, ImageStat, ImageEnhance
+from PIL import Image, ImageOps, ImageStat, ImageEnhance, ImageDraw
 from dotenv import load_dotenv
 import threading
 from flask import Flask
 import asyncio
 import pytesseract
 
-# --- PHẦN 1: WEB SERVER (Giữ bot online trên Render) ---
+# --- SERVER GIỮ BOT ONLINE ---
 app = Flask(__name__)
-
 @app.route('/')
-def home():
-    return "Bot OCR Karuta đang hoạt động."
-
+def home(): return "Bot OCR Debug đang chạy."
 def run_web_server():
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
 
-# --- PHẦN 2: CẤU HÌNH ---
+# --- CẤU HÌNH ---
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 KARUTA_ID = 646937666251915264
 
-# Nếu chạy trên Windows thì mở comment dòng dưới
 # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-def clean_print_number(text):
-    """Lọc bỏ ký tự rác, chỉ giữ lại số"""
+def extract_number_with_regex(text):
+    """
+    Dùng Regex để tìm số Print trong đống văn bản hỗn độn.
+    Ưu tiên tìm chuỗi có dạng '#12345'.
+    Nếu không thấy dấu #, tìm chuỗi số dài nhất ở cuối câu.
+    """
     if not text: return "???"
-    text = re.sub(r'[^\d]', '', text) 
-    return text if text else "???"
+    
+    # Bước 1: Tìm chuỗi dạng #12345 (có dấu # ở trước)
+    match_hash = re.search(r'#\s*(\d+)', text)
+    if match_hash:
+        return match_hash.group(1)
+    
+    # Bước 2: Nếu không có dấu #, tìm các nhóm số (vd: 28183-2 -> lấy 28183)
+    # Lấy tất cả các nhóm số
+    numbers = re.findall(r'\d+', text)
+    if numbers:
+        # Thường số print là số có nhiều chữ số nhất hoặc nằm cuối cùng
+        # Lọc các số quá ngắn (dưới 2 chữ số) có thể là rác
+        valid_numbers = [n for n in numbers if len(n) >= 2]
+        if valid_numbers:
+            return valid_numbers[-1] # Lấy số cuối cùng tìm thấy
+        return numbers[-1]
+        
+    return "???"
 
 async def get_print_numbers_from_image(image_bytes):
     try:
         img = Image.open(io.BytesIO(image_bytes))
         w_img, h_img = img.size
         
-        # In log kích thước ảnh để kiểm tra
-        print(f"  [DEBUG] Kích thước ảnh gốc: {w_img}x{h_img}")
+        # Tạo một bản sao của ảnh để VẼ KHUNG ĐỎ (Debug)
+        debug_draw_img = img.copy()
+        draw = ImageDraw.Draw(debug_draw_img)
 
-        # Tính toán kích thước 1 thẻ (Ảnh Karuta drop 3 thẻ ngang)
+        # Tính toán kích thước 1 thẻ
         card_w = w_img / 3
         
-        # --- CẤU HÌNH CẮT THEO TỈ LỆ % (QUAN TRỌNG) ---
-        # Thay vì dùng pixel cố định, ta dùng % để áp dụng cho mọi size ảnh
+        # --- CHIẾN THUẬT CẮT VÙNG RỘNG (SAFE ZONE) ---
+        # Thay vì cắt sát sạt, ta cắt rộng ra để đảm bảo không bị trượt.
+        # Top: Lấy từ 75% chiều dọc trở xuống (Bao gồm cả tên Series và đáy thẻ)
+        # Left: Lấy từ 40% chiều ngang thẻ (Bên phải)
         
-        # Left: Bắt đầu từ 35% chiều ngang của thẻ (để lấy phần số bên phải)
-        # Top: Bắt đầu từ 88% chiều dọc của thẻ (để lấy phần đáy chứa số)
-        ratio_left = 0.35  
-        ratio_top = 0.88   
+        ratio_top = 0.75 
+        ratio_left = 0.40
         
-        # Tính ra pixel thực tế
         rel_top = int(h_img * ratio_top)
-        rel_bottom = h_img # Đáy ảnh
+        rel_bottom = h_img
         rel_left = int(card_w * ratio_left)
-        rel_right = int(card_w * 0.99) # Sát mép phải (chừa 1% viền)
+        rel_right = int(card_w * 0.99) # Sát mép phải
 
         results = []
-        debug_images = [] # Danh sách ảnh cắt được để gửi lại Discord
+        cropped_images = [] # Ảnh cắt nhỏ để OCR
 
         for i in range(3):
-            # 1. Xác định tọa độ X bắt đầu của từng thẻ
             card_x_start = int(i * card_w)
             
-            # 2. Tính tọa độ cắt chính xác trên ảnh gốc
             box_left = card_x_start + rel_left
             box_top = rel_top
             box_right = card_x_start + rel_right
             box_bottom = rel_bottom
 
-            # 3. Cắt ảnh
+            # 1. Vẽ khung đỏ lên ảnh Debug để bạn kiểm tra
+            draw.rectangle([box_left, box_top, box_right, box_bottom], outline="red", width=5)
+
+            # 2. Cắt ảnh để xử lý OCR
             crop = img.crop((box_left, box_top, box_right, box_bottom))
 
-            # --- XỬ LÝ ẢNH NÂNG CAO ---
-            # Phóng to gấp 4 lần để Tesseract đọc rõ hơn
-            crop = crop.resize((crop.width * 4, crop.height * 4), Image.Resampling.LANCZOS)
-            
-            # Chuyển sang ảnh xám
+            # --- XỬ LÝ ẢNH ---
+            crop = crop.resize((crop.width * 3, crop.height * 3), Image.Resampling.LANCZOS)
             crop = crop.convert('L')
             
-            # Tự động nhận diện nền Sáng hay Tối
+            # Tự động đảo màu nếu nền đen
             stat = ImageStat.Stat(crop)
-            avg_brightness = stat.mean[0]
-            
-            # Nếu nền tối (đen) -> Đảo màu thành nền trắng chữ đen
-            if avg_brightness < 100: 
+            if stat.mean[0] < 128: 
                 crop = ImageOps.invert(crop)
 
-            # Tăng độ tương phản mạnh
             enhancer = ImageEnhance.Contrast(crop)
             crop = enhancer.enhance(2.0)
             
-            # Chuẩn hóa trắng đen (Threshold)
-            crop = crop.point(lambda p: 255 if p > 160 else 0)
-
-            # Lưu ảnh vào bộ nhớ để gửi lại Discord (Debug)
+            # Lưu ảnh crop (nếu muốn xem chi tiết vùng cắt)
             img_byte_arr = io.BytesIO()
             crop.save(img_byte_arr, format='PNG')
             img_byte_arr.seek(0)
-            debug_images.append(discord.File(img_byte_arr, filename=f"debug_card_{i+1}.png"))
+            cropped_images.append(discord.File(img_byte_arr, filename=f"crop_{i+1}.png"))
 
-            # 4. Đọc OCR
-            # psm 7: Coi ảnh là một dòng văn bản đơn lẻ
-            custom_config = r"--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789"
+            # 3. OCR (Đọc cả khối văn bản)
+            # --psm 6: Assume a single uniform block of text.
+            custom_config = r"--psm 6 --oem 3" 
             raw_text = pytesseract.image_to_string(crop, config=custom_config).strip()
             
-            cleaned = clean_print_number(raw_text)
-            results.append(cleaned)
-            print(f"  [Card {i+1}] Raw: {raw_text} -> Clean: {cleaned}")
+            # Dùng Regex để mò số trong đống chữ vừa đọc
+            final_num = extract_number_with_regex(raw_text)
+            results.append(final_num)
+            print(f"  [Card {i+1}] Raw OCR: '{raw_text}' -> Regex Found: '{final_num}'")
 
-        return results, debug_images
+        # Lưu ảnh Debug tổng thể (có khung đỏ)
+        full_debug_byte = io.BytesIO()
+        debug_draw_img.save(full_debug_byte, format='PNG')
+        full_debug_byte.seek(0)
+        debug_file = discord.File(full_debug_byte, filename="DEBUG_RED_BOX.png")
+
+        return results, debug_file
 
     except Exception as e:
-        print(f"Lỗi xử lý ảnh: {e}")
-        return [], []
+        print(f"Lỗi: {e}")
+        return [], None
 
-# --- PHẦN 3: BOT DISCORD ---
+# --- BOT DISCORD ---
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f'✅ Bot đã online: {bot.user}')
+    print(f'✅ Bot Online: {bot.user}')
 
 @bot.event
 async def on_message(message):
-    # Chỉ nhận tin nhắn từ Karuta có đính kèm ảnh
-    if not (message.author.id == KARUTA_ID and message.attachments):
-        return
-
-    attachment = message.attachments[0]
-    if not attachment.content_type.startswith('image/'):
-        return
+    if not (message.author.id == KARUTA_ID and message.attachments): return
+    if not message.attachments[0].content_type.startswith('image/'): return
 
     print("\n" + "="*30)
-    print("🔎 Phát hiện ảnh Karuta Drop...")
+    print("🔎 Đang xử lý ảnh Karuta...")
 
     try:
-        response = requests.get(attachment.url)
+        response = requests.get(message.attachments[0].url)
         image_bytes = response.content
         
-        # Gọi hàm xử lý (Nhận về kết quả số VÀ hình ảnh debug)
-        numbers, debug_imgs = await get_print_numbers_from_image(image_bytes)
+        # Hàm trả về: Danh sách số VÀ Ảnh Debug toàn cảnh
+        numbers, debug_img_file = await get_print_numbers_from_image(image_bytes)
 
         if numbers:
             reply_lines = []
             emojis = ["1️⃣", "2️⃣", "3️⃣"]
-            
             for i, num in enumerate(numbers):
                 reply_lines.append(f"▪️ {emojis[i]} | **#{num}**")
             
             reply_text = "\n".join(reply_lines)
             
-            # Gửi tin nhắn kèm theo 3 tấm ảnh bot đã cắt
-            await message.reply(content=reply_text, files=debug_imgs)
+            # Gửi kết quả và ảnh Debug Khung Đỏ
+            await message.reply(content=reply_text, file=debug_img_file)
             print("✅ Đã gửi kết quả.")
 
     except Exception as e:
         print(f"❌ Lỗi: {e}")
-    print("="*30 + "\n")
 
-# --- PHẦN 4: KHỞI CHẠY ---
 if __name__ == "__main__":
     if TOKEN:
-        # Chạy Bot ở luồng riêng
-        t = threading.Thread(target=bot.run, args=(TOKEN,))
-        t.start()
-        # Chạy Web Server
+        threading.Thread(target=bot.run, args=(TOKEN,)).start()
         run_web_server()
-    else:
-        print("❌ LỖI: Chưa có DISCORD_TOKEN trong file .env")
