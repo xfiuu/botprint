@@ -15,7 +15,7 @@ import concurrent.futures
 # --- SERVER GIỮ BOT ONLINE ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot OCR Hybrid Speed & Accuracy."
+def home(): return "Bot OCR Hybrid Fix."
 def run_web_server():
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
@@ -25,29 +25,30 @@ load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 KARUTA_ID = 646937666251915264
 
-# Nếu chạy trên Windows thì mở dòng dưới
+# QUAN TRỌNG: Mở dòng dưới nếu chạy trên máy tính Windows cá nhân
 # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 def filter_print_number(text):
-    """Lọc số thông minh: Lấy chuỗi số dài nhất để tránh lấy nhầm edition"""
     if not text: return "???"
-    # Chỉ giữ số và dấu gạch
     clean = re.sub(r'[^\d-]', '', text)
-    # Tìm các cụm số
     matches = re.findall(r'\d+', clean)
     if matches:
-        # Sắp xếp theo độ dài, lấy số dài nhất (thường là Print)
         matches.sort(key=len, reverse=True)
         return matches[0]
     return "???"
 
-def process_single_card(img, index):
-    """Hàm xử lý 1 thẻ độc lập (để chạy đa luồng)"""
+def process_single_card(image_bytes, index):
+    """
+    Mỗi luồng sẽ nhận data gốc và tự mở ảnh.
+    An toàn hơn việc truyền 1 object Image cho nhiều luồng (tránh lỗi crash ngầm).
+    """
     try:
+        # Mở ảnh mới hoàn toàn trong luồng này
+        img = Image.open(io.BytesIO(image_bytes))
         w_img, h_img = img.size
-        card_w = w_img / 3
         
-        # Tọa độ cắt chuẩn xác từ Vaelis 1
+        # Tọa độ cắt (giữ nguyên setting chuẩn)
+        card_w = w_img / 3
         ratio_top, ratio_bottom = 0.88, 0.94
         ratio_left, ratio_right = 0.54, 0.78
         
@@ -61,40 +62,31 @@ def process_single_card(img, index):
         
         crop = img.crop(box)
         
-        # --- XỬ LÝ ẢNH (Tối ưu) ---
-        # Resize 3x (Cân bằng giữa nét và nhẹ) - BICUBIC tốt hơn BILINEAR
+        # Xử lý ảnh: Resize 3x + Threshold
         crop = crop.resize((crop.width * 3, crop.height * 3), Image.Resampling.BICUBIC)
         crop = crop.convert('L')
-        
-        # Threshold 110: Ngưỡng an toàn để chữ tách khỏi nền
         crop = crop.point(lambda p: 255 if p > 110 else 0)
-        
-        # Đảo màu (Chữ đen nền trắng) + Viền an toàn
         crop = ImageOps.invert(crop)
         crop = ImageOps.expand(crop, border=10, fill='white')
         
-        # OCR config: Chỉ đọc số
+        # OCR
         custom_config = r"--psm 7 -c tessedit_char_whitelist=0123456789-"
         raw_text = pytesseract.image_to_string(crop, config=custom_config)
         
         return filter_print_number(raw_text)
         
-    except Exception:
-        return "???"
+    except Exception as e:
+        return f"Err: {str(e)}"
 
 async def solve_ocr_hybrid(image_bytes):
-    """Chiến thuật: Chạy 3 luồng song song thay vì gộp ảnh"""
-    img = Image.open(io.BytesIO(image_bytes))
-    
     loop = asyncio.get_running_loop()
     
-    # ThreadPoolExecutor giúp chạy 3 tác vụ OCR cùng lúc
-    # Thời gian xử lý sẽ = thời gian của thẻ chậm nhất (thay vì tổng 3 thẻ)
+    # Chạy 3 luồng song song, mỗi luồng nhận image_bytes gốc
     with concurrent.futures.ThreadPoolExecutor() as pool:
         tasks = [
-            loop.run_in_executor(pool, process_single_card, img, 0),
-            loop.run_in_executor(pool, process_single_card, img, 1),
-            loop.run_in_executor(pool, process_single_card, img, 2)
+            loop.run_in_executor(pool, process_single_card, image_bytes, 0),
+            loop.run_in_executor(pool, process_single_card, image_bytes, 1),
+            loop.run_in_executor(pool, process_single_card, image_bytes, 2)
         ]
         results = await asyncio.gather(*tasks)
         
@@ -107,46 +99,63 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f'🚀 HYBRID BOT READY: {bot.user}')
+    print(f'✅ BOT ĐÃ ONLINE: {bot.user}')
 
 @bot.event
 async def on_message(message):
-    if message.author.id != KARUTA_ID: return
+    # --- DEBUG MODE: Tạm thời cho phép mọi người dùng để test ---
+    # Nếu muốn chỉ Karuta dùng, hãy bỏ comment dòng dưới sau khi test xong:
+    # if message.author.id != KARUTA_ID: return
+
     if not message.attachments: return
     
     try:
         att = message.attachments[0]
         if "image" not in att.content_type: return
+        
+        print(f"📥 Đang nhận ảnh từ {message.author.name}...")
 
-        # 1. Tải ảnh ASYNC (Siêu nhanh)
+        # Tải ảnh
         async with aiohttp.ClientSession() as session:
             async with session.get(att.url) as resp:
-                if resp.status != 200: return
+                if resp.status != 200:
+                    await message.channel.send("❌ Không tải được ảnh từ Discord.")
+                    return
                 image_bytes = await resp.read()
 
-        # 2. Xử lý Đa luồng (Nhanh & Chính xác)
+        # Xử lý
         numbers = await solve_ocr_hybrid(image_bytes)
+        
+        # In ra console để kiểm tra
+        print(f"📊 Kết quả OCR: {numbers}")
 
-        if numbers:
-            # Tạo Embed gọn đẹp
-            embed = discord.Embed(color=0x36393f)
-            description = ""
-            emojis = ["1️⃣", "2️⃣", "3️⃣"]
-            
-            has_data = False
-            for i, num in enumerate(numbers):
-                if num not in ["???", ""]:
-                    description += f"`{emojis[i]}` **#{num}** "
-                    has_data = True
-                else:
-                    description += f"`{emojis[i]}` ...   "
-            
-            if has_data:
-                embed.description = description
-                await message.reply(embed=embed, mention_author=False)
+        # Gửi kết quả
+        embed = discord.Embed(color=0x36393f)
+        description = ""
+        emojis = ["1️⃣", "2️⃣", "3️⃣"]
+        
+        has_valid_number = False
+        for i, num in enumerate(numbers):
+            if "Err" in num:
+                description += f"`{emojis[i]}` ⚠️ Lỗi OCR\n"
+            elif num in ["???", ""]:
+                description += f"`{emojis[i]}` ...\n"
+            else:
+                description += f"`{emojis[i]}` **#{num}**\n"
+                has_valid_number = True
+        
+        # Nếu đọc được ít nhất 1 số thì gửi, hoặc gửi báo lỗi nếu muốn
+        if has_valid_number or "Err" in str(numbers):
+            embed.description = description
+            embed.set_footer(text="Hybrid Speed Mode")
+            await message.reply(embed=embed, mention_author=False)
+        else:
+             print("⚠️ Không tìm thấy số nào rõ ràng.")
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ LỖI NGHIÊM TRỌNG: {e}")
+        # Báo lỗi thẳng vào chat để biết đường sửa
+        await message.channel.send(f"⚠️ Bot gặp lỗi: `{e}`")
 
 if __name__ == "__main__":
     if TOKEN:
