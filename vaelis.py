@@ -4,7 +4,8 @@ import os
 import re
 import aiohttp
 import io
-from PIL import Image, ImageOps, ImageChops, ImageFilter 
+# Thêm ImageDraw để dùng tính năng tô màu (floodfill)
+from PIL import Image, ImageOps, ImageChops, ImageFilter, ImageDraw 
 from dotenv import load_dotenv
 import threading
 from flask import Flask
@@ -16,7 +17,7 @@ from collections import deque
 # --- SERVER ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "Bot OCR HighRes Mode."
+def home(): return "Bot OCR Edge Clean Mode."
 def run_web_server():
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
@@ -34,7 +35,7 @@ def solve_ocr_fast(image_bytes, return_image=False):
         
         card_w = w_img / 3
         
-        # Tọa độ cắt (Giữ nguyên vì đã chuẩn)
+        # Tọa độ cắt
         ratio_top, ratio_bottom = 0.88, 0.94
         ratio_left, ratio_right = 0.54, 0.78 
 
@@ -50,12 +51,11 @@ def solve_ocr_fast(image_bytes, return_image=False):
             )
             crop = img.crop(box)
 
-            # 2. XỬ LÝ (TINH CHỈNH MỚI)
-            # --- UPDATE 1: Resize cực lớn (x5) ---
-            # Dùng LANCZOS để giữ nét tốt hơn Bilinear khi phóng to
+            # 2. XỬ LÝ
+            # Resize x5 (High Res)
             crop = crop.resize((crop.width * 5, crop.height * 5), Image.Resampling.LANCZOS)
             
-            # --- Tách nền (Red - Blue) ---
+            # Channel Subtraction (Tách nền)
             if crop.mode != 'RGB': crop = crop.convert('RGB')
             r, g, b = crop.split()
             processed = ImageChops.subtract(r, b)
@@ -64,12 +64,30 @@ def solve_ocr_fast(image_bytes, return_image=False):
             processed = processed.point(lambda p: 255 if p > 50 else 0)
             processed = ImageOps.invert(processed)
             
-            # --- UPDATE 2: Làm đậm vừa phải ---
-            # Vẫn dùng MinFilter(3) nhưng trên ảnh to gấp 5 lần
-            # -> Nét chữ dày lên nhưng lỗ số 8 vẫn thoáng
+            # MinFilter (Làm đậm nét)
             processed = processed.filter(ImageFilter.MinFilter(3))
 
-            # Thêm viền trắng
+            # --- BƯỚC MỚI: XÓA RÁC DÍNH VIỀN (FLOOD FILL) ---
+            # Số màu ĐEN (0), Nền màu TRẮNG (255)
+            # Ta quét dọc mép trái và mép phải. 
+            # Nếu thấy màu đen dính mép -> Tô trắng nó đi.
+            
+            ImageDraw.floodfill(processed, (0, 0), 255) # Fix nhẹ góc trên trái
+            
+            # 1. Quét mép trái (Xử lý cái vệt đen bạn gặp)
+            for y in range(processed.height):
+                # Nếu pixel tại (0, y) là màu đen (0)
+                if processed.getpixel((0, y)) == 0:
+                    # Tô trắng toàn bộ vùng đen dính với nó
+                    ImageDraw.floodfill(processed, (0, y), 255)
+
+            # 2. Quét mép phải (Đề phòng khung bên phải lấn qua)
+            w_p = processed.width
+            for y in range(processed.height):
+                if processed.getpixel((w_p - 1, y)) == 0:
+                    ImageDraw.floodfill(processed, (w_p - 1, y), 255)
+
+            # Thêm viền trắng an toàn sau khi đã làm sạch
             processed = ImageOps.expand(processed, border=50, fill='white')
             
             crops.append(processed)
@@ -114,11 +132,10 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f'✨ BOT FIX 8 vs 0 READY: {bot.user}')
+    print(f'✨ BOT EDGE CLEANER READY: {bot.user}')
 
 @bot.command()
 async def ocr(ctx):
-    """Lệnh test xem ảnh bot nhìn thấy thế nào"""
     target_url = None
     if ctx.message.attachments:
         target_url = ctx.message.attachments[0].url
@@ -147,8 +164,8 @@ async def ocr(ctx):
                 processed_img.save(image_binary, 'PNG')
                 image_binary.seek(0)
                 await ctx.send(
-                    content="**Ảnh High-Res (Đã fix lỗi 8 thành 0):**",
-                    file=discord.File(fp=image_binary, filename='fix_8_0.png')
+                    content="**Ảnh đã xóa vệt đen dính mép:**",
+                    file=discord.File(fp=image_binary, filename='clean_edge.png')
                 )
 
 @bot.event
@@ -172,7 +189,7 @@ async def on_message(message):
 
         if numbers:
             embed = discord.Embed(color=0x36393f, timestamp=message.created_at)
-            embed.set_footer(text="⚡ High Accuracy") 
+            embed.set_footer(text="⚡ Clean Edge Mode") 
             description = ""
             emojis = ["1️⃣", "2️⃣", "3️⃣"]
             for i, num in enumerate(numbers):
